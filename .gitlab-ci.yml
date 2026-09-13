@@ -21,9 +21,9 @@ automated-code-review:
   
   # Environment variables stored in GitLab Settings → CI/CD → Variables
   variables:
-    CLAUDE_API_URL: "${CLAUDE_API_URL}"      # Your local Claude API endpoint
-    CLAUDE_API_KEY: "${CLAUDE_API_KEY}"      # Claude API key
-    GITLAB_TOKEN: "${GITLAB_TOKEN}"          # GitLab personal access token
+    CLAUDE_API_URL: $CLAUDE_API_URL      # Your local Claude API endpoint
+    CLAUDE_API_KEY: $CLAUDE_API_KEY      # Claude API key
+    GITLAB_TOKEN: $GITLAB_TOKEN          # GitLab personal access token
   
   allow_failure: true  # Don't block the pipeline if review fails
 
