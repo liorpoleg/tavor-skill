@@ -166,6 +166,14 @@ class CodeReviewAgent:
         """Validate all required environment variables"""
         missing = []
         
+        print("🔍 DEBUG: Environment Variables")
+        print(f"   CLAUDE_API_URL: {CLAUDE_API_URL}")
+        print(f"   CLAUDE_API_KEY: {CLAUDE_API_KEY[:20] if CLAUDE_API_KEY else 'NOT SET'}...")
+        print(f"   GITLAB_TOKEN: {GITLAB_TOKEN[:20] if GITLAB_TOKEN else 'NOT SET'}...")
+        print(f"   PROJECT_ID: {PROJECT_ID}")
+        print(f"   MR_IID: {MR_IID}")
+        print()
+        
         if not CLAUDE_API_KEY:
             missing.append("CLAUDE_API_KEY")
         if not GITLAB_TOKEN:
