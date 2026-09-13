@@ -320,7 +320,8 @@ Respond ONLY with the JSON, no other text."""
                 f"{CLAUDE_API_URL}/v1/messages",
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {CLAUDE_API_KEY}"
+                    "x-api-key": CLAUDE_API_KEY,
+                    "anthropic-version": "2023-06-01"
                 },
                 json={
                     "model": "claude-opus-4.5",
