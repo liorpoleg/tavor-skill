@@ -364,7 +364,7 @@ class CodeReviewAgent:
         print(f"   Title: {self.mr_title}")
     
     def get_mr_diff(self) -> str:
-        """Fetch the code diff from the MR"""
+        """Fetch the code diff from the MR - handles large diffs intelligently"""
         print("📥 Fetching code diff...")
         response = requests.get(
             f"{self.mr_api}/changes",
@@ -374,18 +374,47 @@ class CodeReviewAgent:
         
         changes = response.json()
         diff_text = ""
+        file_summaries = []
         
         for change in changes.get("changes", []):
             new_path = change.get("new_path", change.get("old_path", "unknown"))
+            diff_content = change.get("diff", "[No diff content]")
+            
+            # Track file sizes
+            file_summaries.append({
+                'path': new_path,
+                'size': len(diff_content),
+                'status': change.get('new_file', False) and 'NEW' or (
+                    change.get('deleted_file', False) and 'DELETED' or 'MODIFIED'
+                )
+            })
+            
             diff_text += f"\n\n{'='*60}\nFILE: {new_path}\n{'='*60}\n"
-            diff_text += change.get("diff", "[No diff content]")
+            diff_text += diff_content
         
-        # Truncate if too large (Claude has token limits)
-        max_size = 15000
-        if len(diff_text) > max_size:
-            diff_text = diff_text[:max_size] + f"\n\n[... diff truncated, total size: {len(diff_text)} chars ...]"
+        total_size = len(diff_text)
         
-        print(f"   Got diff ({len(diff_text)} chars)")
+        # If diff is too large, use smart truncation
+        max_size = 20000  # Increased from 15000 to 20000
+        if total_size > max_size:
+            # Keep first max_size chars but try to preserve file boundaries
+            truncated = diff_text[:max_size]
+            
+            # Find the last complete file section
+            last_section = truncated.rfind('\n=')
+            if last_section > max_size * 0.8:  # Only use if we lose less than 20%
+                truncated = truncated[:last_section]
+            
+            # Add summary of truncated files
+            summary = f"\n\n📋 DIFF TRUNCATED: Showing {len(truncated)} of {total_size} chars\n"
+            summary += "CHANGED FILES SUMMARY:\n"
+            for file_info in file_summaries:
+                summary += f"  • {file_info['status']:8} {file_info['path']} ({file_info['size']} chars)\n"
+            summary += "\n[For full diff review, please split large MRs into smaller ones]\n"
+            
+            diff_text = truncated + summary
+        
+        print(f"   Got diff ({len(diff_text)} chars, showing {min(total_size, max_size)} of {total_size})")
         return diff_text
     
     def get_changed_files(self) -> List[str]:
@@ -413,6 +442,8 @@ class CodeReviewAgent:
         
         prompt = f"""You are an expert code reviewer for the Tavor project. Review this merge request code against our team's Tavor Code Review Conventions.
 
+NOTE: If you see "DIFF TRUNCATED" in the diff, the review is based on the first part of the changes. Focus your review on what's visible.
+
 ## PROJECT: Tavor
 MR Title: {self.mr_title}
 
@@ -433,6 +464,10 @@ Analyze the code and identify:
 1. **Critical Issues (BLOCKERS)**: SRP violations, zero "any" type violations, missing Swagger decorators (backend), deprecated packages, security issues
 2. **Major Issues (WARNINGS)**: Logic complexity, missing logging, poor naming, type safety issues, missing error handling
 3. **Minor Issues (SUGGESTIONS)**: Code simplicity improvements, documentation suggestions, architectural recommendations
+
+For large MRs with truncated diffs:
+- Review only the visible portion
+- Note if review is incomplete: "⚠️ Review incomplete: diff was truncated. Please split into smaller MRs for full review."
 
 Format your response as valid JSON:
 {{
@@ -472,7 +507,7 @@ Format your response as valid JSON:
 Respond ONLY with the JSON, no other text."""
         
         try:
-            review_text = llm.complete(prompt, max_tokens=2000)
+            review_text = llm.complete(prompt, max_tokens=4000)  # Increased from 2000
             
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', review_text, re.DOTALL)
