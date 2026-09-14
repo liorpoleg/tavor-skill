@@ -4,13 +4,23 @@ Tavor Automated Code Review Agent
 Runs on every GitLab merge request to review code against team conventions
 
 Usage:
-  CLAUDE_API_URL=http://localhost:8000 \
-  CLAUDE_API_KEY=your_key \
+  LLM_ENDPOINT=http://localhost:8000 \
+  LLM_MODEL=claude-opus-4-1-20250805 \
+  LLM_API_KEY=your_key \
   GITLAB_TOKEN=your_token \
   CI_PROJECT_ID=123 \
   CI_MERGE_REQUEST_IID=456 \
   CI_SERVER_URL=https://gitlab.example.com \
   python scripts/code-review.py
+
+Environment Variables:
+  LLM_ENDPOINT     - LLM API endpoint (e.g., http://localhost:8000 or https://api.anthropic.com)
+  LLM_MODEL        - Model name (e.g., claude-opus-4-1-20250805)
+  LLM_API_KEY      - API key for authentication
+  GITLAB_TOKEN     - GitLab personal access token
+  CI_PROJECT_ID    - GitLab project ID (set by CI/CD)
+  CI_MERGE_REQUEST_IID - MR ID (set by CI/CD)
+  CI_SERVER_URL    - GitLab server URL
 """
 
 import os
@@ -22,12 +32,88 @@ from typing import Optional, List, Dict, Any
 
 
 # Configuration from environment
-CLAUDE_API_URL = os.getenv("CLAUDE_API_URL", "http://localhost:8000")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+LLM_ENDPOINT = os.getenv("LLM_ENDPOINT", "http://localhost:8000")
+LLM_MODEL = os.getenv("LLM_MODEL", "claude-opus-4-1-20250805")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 GITLAB_URL = os.getenv("CI_SERVER_URL", "https://gitlab.example.com")
 GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
 PROJECT_ID = os.getenv("CI_PROJECT_ID")
 MR_IID = os.getenv("CI_MERGE_REQUEST_IID")
+
+
+class LLMError(Exception):
+    """Raised when LLM request fails"""
+    pass
+
+
+class LLMClient:
+    """Client for communicating with LLM API (Claude, etc.)"""
+    
+    def __init__(self):
+        # Endpoint is the only outbound URL in this system
+        self.endpoint = LLM_ENDPOINT.strip().rstrip('/')
+        self.model = LLM_MODEL
+        self._session = requests.Session()
+        
+        if not self.endpoint:
+            raise LLMError('LLM_ENDPOINT is not configured.')
+        if not self.model:
+            raise LLMError('LLM_MODEL is not configured.')
+        
+        api_key = LLM_API_KEY
+        if api_key:
+            self._session.headers['Authorization'] = f'Bearer {api_key}'
+            self._session.headers['x-api-key'] = api_key
+        
+        self._session.headers['Content-Type'] = 'application/json'
+        self._session.headers['anthropic-version'] = '2023-06-01'
+    
+    def _post(self, messages: List[Dict[str, str]], max_tokens: int = 2000, 
+              temperature: float = 0.3) -> str:
+        """Send a message to the LLM and return the response"""
+        
+        payload = {
+            'model': self.model,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature
+        }
+        
+        try:
+            response = self._session.post(
+                f"{self.endpoint}/v1/messages",
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError as e:
+            raise LLMError(f'Could not connect to LLM at {self.endpoint}: {e}') from e
+        except requests.exceptions.Timeout as e:
+            raise LLMError(f'LLM request timed out: {e}') from e
+        except requests.exceptions.RequestException as e:
+            raise LLMError(f'LLM request failed: {e}') from e
+        
+        try:
+            data = response.json()
+            return data['content'][0]['message']['content']
+        except (KeyError, IndexError, TypeError) as e:
+            # Try alternate response format
+            try:
+                data = response.json()
+                return data['content'][0]['text']
+            except (KeyError, IndexError, TypeError):
+                raise LLMError(f'Unexpected LLM response format: {e}') from e
+    
+    def complete(self, prompt: str, max_tokens: int = 2000) -> str:
+        """Single message completion"""
+        return self._post([{'role': 'user', 'content': prompt}], 
+                         max_tokens=max_tokens)
+    
+    def chat(self, system_prompt: str, messages: List[Dict[str, str]], 
+             max_tokens: int = 2000) -> str:
+        """Multi-turn chat with system prompt"""
+        all_messages = [{'role': 'system', 'content': system_prompt}] + messages
+        return self._post(all_messages, max_tokens=max_tokens)
 
 # Tavor Skill - Team conventions for code review
 TAVOR_SKILL = """# Tavor Code Review Conventions
@@ -167,15 +253,20 @@ class CodeReviewAgent:
         missing = []
         
         print("🔍 DEBUG: Environment Variables")
-        print(f"   CLAUDE_API_URL: {CLAUDE_API_URL}")
-        print(f"   CLAUDE_API_KEY: {CLAUDE_API_KEY[:20] if CLAUDE_API_KEY else 'NOT SET'}...")
+        print(f"   LLM_ENDPOINT: {LLM_ENDPOINT}")
+        print(f"   LLM_MODEL: {LLM_MODEL}")
+        print(f"   LLM_API_KEY: {LLM_API_KEY[:20] if LLM_API_KEY else 'NOT SET'}...")
         print(f"   GITLAB_TOKEN: {GITLAB_TOKEN[:20] if GITLAB_TOKEN else 'NOT SET'}...")
         print(f"   PROJECT_ID: {PROJECT_ID}")
         print(f"   MR_IID: {MR_IID}")
         print()
         
-        if not CLAUDE_API_KEY:
-            missing.append("CLAUDE_API_KEY")
+        if not LLM_ENDPOINT:
+            missing.append("LLM_ENDPOINT")
+        if not LLM_MODEL:
+            missing.append("LLM_MODEL")
+        if not LLM_API_KEY:
+            missing.append("LLM_API_KEY")
         if not GITLAB_TOKEN:
             missing.append("GITLAB_TOKEN")
         if not PROJECT_ID:
@@ -188,7 +279,7 @@ class CodeReviewAgent:
             sys.exit(1)
         
         print(f"✅ Configuration valid")
-        print(f"   Claude API: {CLAUDE_API_URL}")
+        print(f"   LLM API: {LLM_ENDPOINT} (model: {LLM_MODEL})")
         print(f"   GitLab: {GITLAB_URL}")
         print(f"   Project: {PROJECT_ID}, MR: {MR_IID}")
     
@@ -249,9 +340,9 @@ class CodeReviewAgent:
         print(f"   Files changed: {len(files)}")
         return files
     
-    def review_with_claude(self, diff: str, files: List[str]) -> Dict[str, Any]:
-        """Call Claude API to review the code"""
-        print("\n🤖 Calling Claude for review...")
+    def review_with_claude(self, diff: str, files: List[str], llm: LLMClient) -> Dict[str, Any]:
+        """Call LLM to review the code against Tavor conventions"""
+        print("\n🤖 Calling LLM for review...")
         
         files_str = "\n".join([f"  - {f}" for f in files])
         
@@ -316,26 +407,7 @@ Format your response as valid JSON:
 Respond ONLY with the JSON, no other text."""
         
         try:
-            response = requests.post(
-                f"{CLAUDE_API_URL}/v1/messages",
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": CLAUDE_API_KEY,
-                    "anthropic-version": "2023-06-01"
-                },
-                json={
-                    "model": "claude-opus-4.5",
-                    "max_tokens": 2000,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ]
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            review_text = data["content"][0]["text"]
+            review_text = llm.complete(prompt, max_tokens=2000)
             
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', review_text, re.DOTALL)
@@ -347,15 +419,11 @@ Respond ONLY with the JSON, no other text."""
             print(f"   ✅ Review complete (score: {review.get('score', '?')}/10, decision: {review.get('approval_decision', '?')})")
             return review
             
-        except requests.exceptions.ConnectionError:
-            print(f"   ❌ Could not connect to Claude API at {CLAUDE_API_URL}")
-            print(f"   Make sure Claude is running and accessible")
-            raise
-        except requests.exceptions.Timeout:
-            print(f"   ❌ Claude API request timed out")
+        except LLMError as e:
+            print(f"   ❌ LLM Error: {e}")
             raise
         except json.JSONDecodeError as e:
-            print(f"   ❌ Invalid JSON from Claude: {e}")
+            print(f"   ❌ Invalid JSON from LLM: {e}")
             raise
     
     def format_review_comment(self, review: Dict[str, Any]) -> str:
@@ -471,6 +539,14 @@ Respond ONLY with the JSON, no other text."""
         print("=" * 60)
         
         try:
+            # Initialize LLM client
+            try:
+                llm = LLMClient()
+                print("✅ LLM Client initialized")
+            except LLMError as e:
+                print(f"❌ Failed to initialize LLM client: {e}")
+                raise
+            
             # Step 1: Get MR details
             self.get_mr_details()
             
@@ -478,8 +554,8 @@ Respond ONLY with the JSON, no other text."""
             diff = self.get_mr_diff()
             files = self.get_changed_files()
             
-            # Step 3: Review with Claude
-            review = self.review_with_claude(diff, files)
+            # Step 3: Review with LLM
+            review = self.review_with_claude(diff, files, llm)
             
             # Step 4: Format comment
             comment = self.format_review_comment(review)
@@ -509,9 +585,10 @@ There was an error during the automated code review:
 ```
 
 **Troubleshooting:**
-1. Check that Claude API is running and accessible at: `{CLAUDE_API_URL}`
-2. Verify GitLab token has `api` scope
-3. Check CI/CD pipeline logs for detailed error messages
+1. Check that LLM is running and accessible at: `{LLM_ENDPOINT}` (model: {LLM_MODEL})
+2. Verify LLM_API_KEY and LLM_MODEL are correctly configured
+3. Verify GitLab token has `api` scope
+4. Check CI/CD pipeline logs for detailed error messages
 
 ---
 _🤖 Review by Tavor_"""

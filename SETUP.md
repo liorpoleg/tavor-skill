@@ -20,23 +20,34 @@ glpat-abcd1234efgh5678ijkl
 
 1. Go to your GitLab project
 2. **Settings → CI/CD → Variables**
-3. Add these 3 variables (click **Add variable** for each):
+3. Add these 4 variables (click **Add variable** for each):
 
 | Key | Value | Protected | Masked |
 |-----|-------|-----------|--------|
-| `CLAUDE_API_URL` | `http://your-claude-server:8000` | ✅ | ✅ |
-| `CLAUDE_API_KEY` | `your-claude-api-key` | ✅ | ✅ |
+| `LLM_ENDPOINT` | `http://your-llm-server:8000` | ✅ | ✅ |
+| `LLM_MODEL` | `claude-opus-4-1-20250805` | ✅ | ❌ |
+| `LLM_API_KEY` | `your-llm-api-key` | ✅ | ✅ |
 | `GITLAB_TOKEN` | `glpat-xxx...` (from Step 1) | ✅ | ✅ |
 
 **For air-gapped local Claude:**
 ```
-CLAUDE_API_URL = http://localhost:8000
+LLM_ENDPOINT = http://localhost:8000
+LLM_MODEL = claude-opus-4-1-20250805
+LLM_API_KEY = your-local-key
 ```
 
 **For cloud Claude (Anthropic API):**
 ```
-CLAUDE_API_URL = https://api.anthropic.com
-CLAUDE_API_KEY = sk-ant-xxx...
+LLM_ENDPOINT = https://api.anthropic.com
+LLM_MODEL = claude-opus-4-1-20250805
+LLM_API_KEY = sk-ant-xxx...
+```
+
+**For other LLM providers:**
+```
+LLM_ENDPOINT = https://your-llm-provider.com/api
+LLM_MODEL = your-model-name
+LLM_API_KEY = your-api-key
 ```
 
 ## Step 3: Add Files to Your Repository
@@ -104,9 +115,16 @@ Then:
 ## 🐛 Quick Troubleshooting
 
 **Pipeline fails with "connection refused"**
-- ❌ Claude API not running or wrong URL
-- ✅ Fix: Check `CLAUDE_API_URL` in GitLab variables
-- ✅ Fix: Verify Claude is running: `curl http://your-api:8000/health`
+- ❌ LLM API not running or wrong endpoint
+- ✅ Fix: Check `LLM_ENDPOINT` in GitLab variables
+- ✅ Fix: Verify LLM is running: `curl http://your-llm:8000/health`
+- ✅ Fix: Check `LLM_API_KEY` is correct for your endpoint
+
+**Pipeline fails with "Bad Request (400)"**
+- ❌ Wrong model name or invalid API configuration
+- ✅ Fix: Check `LLM_MODEL` is correct for your endpoint
+- ✅ Fix: Verify `LLM_ENDPOINT` format (no trailing slash)
+- ✅ Fix: Ensure `LLM_API_KEY` is valid
 
 **Pipeline fails with "token invalid"**
 - ❌ GitLab token missing `write_repository` scope
@@ -119,9 +137,10 @@ Then:
 - ✅ Fix: Check project is not private (if using limited token)
 
 **No review comment shows up**
-- ❌ Pipeline succeeded but Claude returned error
-- ✅ Fix: Check GitLab CI/CD job logs for Claude error
+- ❌ Pipeline succeeded but LLM returned error
+- ✅ Fix: Check GitLab CI/CD job logs for LLM error
 - ✅ Fix: Verify code diff is not too large (>15KB)
+- ✅ Fix: Verify `LLM_ENDPOINT` is accessible from GitLab runner
 
 ## 🎓 Next Steps
 

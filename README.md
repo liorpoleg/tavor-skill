@@ -63,10 +63,16 @@ Add these environment variables to your GitLab project:
 **Settings → CI/CD → Variables**
 
 ```
-CLAUDE_API_URL = http://your-internal-claude-server:8000
-CLAUDE_API_KEY = your_claude_api_key
-GITLAB_TOKEN  = your_gitlab_personal_access_token
+LLM_ENDPOINT = https://api.anthropic.com
+LLM_MODEL = claude-opus-4-1-20250805
+LLM_API_KEY = sk-ant-xxx...
+GITLAB_TOKEN = your_gitlab_personal_access_token
 ```
+
+**Supported LLM Providers:**
+- Anthropic API: `https://api.anthropic.com`
+- Local Claude: `http://localhost:8000`
+- Any compatible LLM endpoint
 
 **Generate GitLab Token:**
 - Go to: GitLab → Settings (top-right) → Access Tokens
@@ -152,8 +158,9 @@ Minor suggestion to add more logging for audit trail.
 
 | Variable | Required | Example | Description |
 |----------|----------|---------|-------------|
-| `CLAUDE_API_URL` | ✅ | `http://localhost:8000` | Your Claude API endpoint |
-| `CLAUDE_API_KEY` | ✅ | `sk-xxx...` | Claude API key |
+| `LLM_ENDPOINT` | ✅ | `https://api.anthropic.com` | LLM API endpoint |
+| `LLM_MODEL` | ✅ | `claude-opus-4-1-20250805` | Model name |
+| `LLM_API_KEY` | ✅ | `sk-ant-xxx...` | LLM API authentication key |
 | `GITLAB_TOKEN` | ✅ | `glpat-xxx...` | GitLab personal access token |
 | `CI_PROJECT_ID` | ✅ | `123` | Set by GitLab automatically |
 | `CI_MERGE_REQUEST_IID` | ✅ | `456` | Set by GitLab automatically |
@@ -170,8 +177,9 @@ Edit `scripts/code-review.py` and modify the `TAVOR_SKILL` constant to adjust wh
 pip install requests python-dotenv
 
 # Set environment variables
-export CLAUDE_API_URL="http://localhost:8000"
-export CLAUDE_API_KEY="your_key"
+export LLM_ENDPOINT="https://api.anthropic.com"
+export LLM_MODEL="claude-opus-4-1-20250805"
+export LLM_API_KEY="sk-ant-xxx..."
 export GITLAB_TOKEN="your_token"
 export CI_PROJECT_ID="123"
 export CI_MERGE_REQUEST_IID="456"
