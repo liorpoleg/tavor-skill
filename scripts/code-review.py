@@ -47,7 +47,7 @@ class LLMError(Exception):
 
 
 class LLMClient:
-    """Client for communicating with LLM API (Claude, etc.)"""
+    """Client for communicating with LLM API - supports multiple providers"""
     
     def __init__(self):
         # Endpoint is the only outbound URL in this system
@@ -60,31 +60,46 @@ class LLMClient:
         if not self.model:
             raise LLMError('LLM_MODEL is not configured.')
         
+        # Detect API format based on endpoint
+        self.api_format = self._detect_api_format()
+        
         api_key = LLM_API_KEY
         if api_key:
+            # Both authentication methods for compatibility
             self._session.headers['Authorization'] = f'Bearer {api_key}'
             self._session.headers['x-api-key'] = api_key
         
         self._session.headers['Content-Type'] = 'application/json'
+        # Anthropic-specific header (other providers ignore it)
         self._session.headers['anthropic-version'] = '2023-06-01'
+    
+    def _detect_api_format(self) -> str:
+        """Detect which API format this endpoint uses"""
+        endpoint_lower = self.endpoint.lower()
+        
+        # Check for known endpoints
+        if 'anthropic.com' in endpoint_lower or '/v1/messages' in endpoint_lower:
+            return 'anthropic'
+        elif 'generativelanguage.googleapis.com' in endpoint_lower:
+            return 'gemini'
+        elif 'openai.com' in endpoint_lower:
+            return 'openai'
+        elif 'chat/completions' in endpoint_lower:
+            return 'openai'  # OpenAI-compatible format
+        else:
+            # Default to OpenAI-compatible (most common)
+            return 'openai'
     
     def _post(self, messages: List[Dict[str, str]], max_tokens: int = 2000, 
               temperature: float = 0.3) -> str:
         """Send a message to the LLM and return the response"""
         
-        payload = {
-            'model': self.model,
-            'messages': messages,
-            'max_tokens': max_tokens,
-            'temperature': temperature
-        }
-        
         try:
-            response = self._session.post(
-                f"{self.endpoint}/v1/messages",
-                json=payload,
-                timeout=60
-            )
+            if self.api_format == 'anthropic':
+                response = self._post_anthropic(messages, max_tokens, temperature)
+            else:  # OpenAI-compatible format (Gemini, OpenAI, etc.)
+                response = self._post_openai_compatible(messages, max_tokens, temperature)
+            
             response.raise_for_status()
         except requests.exceptions.ConnectionError as e:
             raise LLMError(f'Could not connect to LLM at {self.endpoint}: {e}') from e
@@ -93,16 +108,65 @@ class LLMClient:
         except requests.exceptions.RequestException as e:
             raise LLMError(f'LLM request failed: {e}') from e
         
+        return self._extract_response(response)
+    
+    def _post_anthropic(self, messages: List[Dict[str, str]], max_tokens: int, 
+                        temperature: float) -> requests.Response:
+        """POST to Anthropic API format"""
+        url = f"{self.endpoint}/v1/messages" if not self.endpoint.endswith('/messages') else self.endpoint
+        
+        payload = {
+            'model': self.model,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature
+        }
+        
+        return self._session.post(url, json=payload, timeout=60)
+    
+    def _post_openai_compatible(self, messages: List[Dict[str, str]], max_tokens: int,
+                                temperature: float) -> requests.Response:
+        """POST to OpenAI-compatible API format (Gemini, OpenAI, etc.)"""
+        # Endpoint already includes the full path, don't append anything
+        url = self.endpoint
+        
+        payload = {
+            'model': self.model,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': temperature
+        }
+        
+        return self._session.post(url, json=payload, timeout=60)
+    
+    def _extract_response(self, response: requests.Response) -> str:
+        """Extract text from response - handles multiple formats"""
         try:
             data = response.json()
-            return data['content'][0]['message']['content']
-        except (KeyError, IndexError, TypeError) as e:
-            # Try alternate response format
+            
+            # Try Anthropic format first
             try:
-                data = response.json()
                 return data['content'][0]['text']
             except (KeyError, IndexError, TypeError):
-                raise LLMError(f'Unexpected LLM response format: {e}') from e
+                pass
+            
+            # Try OpenAI format (Gemini, OpenAI, etc.)
+            try:
+                return data['choices'][0]['message']['content']
+            except (KeyError, IndexError, TypeError):
+                pass
+            
+            # Try alternate Anthropic format
+            try:
+                return data['content'][0]['message']['content']
+            except (KeyError, IndexError, TypeError):
+                pass
+            
+            # If nothing worked, raise error with the actual response for debugging
+            raise LLMError(f'Unexpected LLM response format. Got: {str(data)[:500]}')
+            
+        except (ValueError, json.JSONDecodeError) as e:
+            raise LLMError(f'Invalid JSON response from LLM: {e}') from e
     
     def complete(self, prompt: str, max_tokens: int = 2000) -> str:
         """Single message completion"""
@@ -114,6 +178,7 @@ class LLMClient:
         """Multi-turn chat with system prompt"""
         all_messages = [{'role': 'system', 'content': system_prompt}] + messages
         return self._post(all_messages, max_tokens=max_tokens)
+
 
 # Tavor Skill - Team conventions for code review
 TAVOR_SKILL = """# Tavor Code Review Conventions
