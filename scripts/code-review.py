@@ -28,7 +28,7 @@ import sys
 import requests
 import json
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 
 # Configuration from environment
@@ -363,8 +363,8 @@ class CodeReviewAgent:
         
         print(f"   Title: {self.mr_title}")
     
-    def get_mr_diff(self) -> str:
-        """Fetch the code diff from the MR - handles large diffs intelligently"""
+    def get_mr_diff(self) -> Tuple[str, int]:
+        """Fetch the code diff from the MR - returns full diff and total size"""
         print("📥 Fetching code diff...")
         response = requests.get(
             f"{self.mr_api}/changes",
@@ -374,48 +374,44 @@ class CodeReviewAgent:
         
         changes = response.json()
         diff_text = ""
-        file_summaries = []
         
         for change in changes.get("changes", []):
             new_path = change.get("new_path", change.get("old_path", "unknown"))
-            diff_content = change.get("diff", "[No diff content]")
-            
-            # Track file sizes
-            file_summaries.append({
-                'path': new_path,
-                'size': len(diff_content),
-                'status': change.get('new_file', False) and 'NEW' or (
-                    change.get('deleted_file', False) and 'DELETED' or 'MODIFIED'
-                )
-            })
-            
             diff_text += f"\n\n{'='*60}\nFILE: {new_path}\n{'='*60}\n"
-            diff_text += diff_content
+            diff_text += change.get("diff", "[No diff content]")
         
         total_size = len(diff_text)
+        print(f"   Got diff ({total_size} chars)")
+        return diff_text, total_size
+    
+    def chunk_diff(self, diff: str, chunk_size: int = 18000) -> List[Tuple[str, int, int]]:
+        """
+        Split diff into chunks while preserving file boundaries
+        Returns list of (chunk_text, chunk_num, total_chunks)
+        """
+        chunks = []
+        lines = diff.split('\n')
+        current_chunk = []
+        current_size = 0
         
-        # If diff is too large, use smart truncation
-        max_size = 20000  # Increased from 15000 to 20000
-        if total_size > max_size:
-            # Keep first max_size chars but try to preserve file boundaries
-            truncated = diff_text[:max_size]
+        for line in lines:
+            line_size = len(line) + 1  # +1 for newline
             
-            # Find the last complete file section
-            last_section = truncated.rfind('\n=')
-            if last_section > max_size * 0.8:  # Only use if we lose less than 20%
-                truncated = truncated[:last_section]
+            # If adding this line would exceed chunk_size, save current chunk
+            if current_size + line_size > chunk_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+                current_size = 0
             
-            # Add summary of truncated files
-            summary = f"\n\n📋 DIFF TRUNCATED: Showing {len(truncated)} of {total_size} chars\n"
-            summary += "CHANGED FILES SUMMARY:\n"
-            for file_info in file_summaries:
-                summary += f"  • {file_info['status']:8} {file_info['path']} ({file_info['size']} chars)\n"
-            summary += "\n[For full diff review, please split large MRs into smaller ones]\n"
-            
-            diff_text = truncated + summary
+            current_chunk.append(line)
+            current_size += line_size
         
-        print(f"   Got diff ({len(diff_text)} chars, showing {min(total_size, max_size)} of {total_size})")
-        return diff_text
+        # Add remaining chunk
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        # Return with chunk number and total
+        return [(chunk, i+1, len(chunks)) for i, chunk in enumerate(chunks)]
     
     def get_changed_files(self) -> List[str]:
         """Get list of changed files and their types"""
@@ -434,27 +430,29 @@ class CodeReviewAgent:
         print(f"   Files changed: {len(files)}")
         return files
     
-    def review_with_claude(self, diff: str, files: List[str], llm: LLMClient) -> Dict[str, Any]:
-        """Call LLM to review the code against Tavor conventions"""
-        print("\n🤖 Calling LLM for review...")
+    def review_chunk(self, diff_chunk: str, chunk_num: int, total_chunks: int, 
+                     files: List[str], llm: LLMClient) -> Dict[str, Any]:
+        """Review a single chunk of the diff"""
+        
+        chunk_indicator = f" (Chunk {chunk_num}/{total_chunks})" if total_chunks > 1 else ""
         
         files_str = "\n".join([f"  - {f}" for f in files])
         
         prompt = f"""You are an expert code reviewer for the Tavor project. Review this merge request code against our team's Tavor Code Review Conventions.
 
-NOTE: If you see "DIFF TRUNCATED" in the diff, the review is based on the first part of the changes. Focus your review on what's visible.
+NOTE: You are reviewing chunk {chunk_num} of {total_chunks}. Focus on issues in this chunk.
 
 ## PROJECT: Tavor
 MR Title: {self.mr_title}
 
-## CHANGED FILES
+## CHANGED FILES (in this chunk)
 {files_str}
 
 ## TAVOR SKILL (Our Code Review Conventions)
 {TAVOR_SKILL}
 
-## CODE DIFF
-{diff}
+## CODE DIFF - CHUNK {chunk_num} of {total_chunks}
+{diff_chunk}
 
 ---
 
@@ -465,49 +463,21 @@ Analyze the code and identify:
 2. **Major Issues (WARNINGS)**: Logic complexity, missing logging, poor naming, type safety issues, missing error handling
 3. **Minor Issues (SUGGESTIONS)**: Code simplicity improvements, documentation suggestions, architectural recommendations
 
-For large MRs with truncated diffs:
-- Review only the visible portion
-- Note if review is incomplete: "⚠️ Review incomplete: diff was truncated. Please split into smaller MRs for full review."
-
 Format your response as valid JSON:
 {{
-  "summary": "Brief overview of the change and overall assessment",
+  "summary": "Review of chunk {chunk_num}",
   "approval_decision": "APPROVE|REQUEST_CHANGES|COMMENT",
-  "approval_reason": "Why you made this decision",
+  "approval_reason": "Why you made this decision for this chunk",
   "score": 8,
-  "critical_issues": [
-    {{
-      "severity": "blocker",
-      "file": "path/to/file.ts",
-      "line": 45,
-      "message": "Missing @ApiResponse decorator for 401 Unauthorized",
-      "convention": "Every endpoint must have @ApiResponse for all status codes"
-    }}
-  ],
-  "major_issues": [
-    {{
-      "severity": "warning",
-      "file": "path/to/file.ts",
-      "line": 120,
-      "message": "Method has 35 lines, consider breaking into smaller functions",
-      "convention": "Methods should be max 30 lines"
-    }}
-  ],
-  "minor_issues": [
-    {{
-      "severity": "suggestion",
-      "file": "path/to/file.ts",
-      "line": 60,
-      "message": "Consider using @IsOptional() for this property",
-      "convention": "Mark optional DTO properties with @IsOptional()"
-    }}
-  ]
+  "critical_issues": [...],
+  "major_issues": [...],
+  "minor_issues": [...]
 }}
 
 Respond ONLY with the JSON, no other text."""
         
         try:
-            review_text = llm.complete(prompt, max_tokens=4000)  # Increased from 2000
+            review_text = llm.complete(prompt, max_tokens=4000)
             
             # Extract JSON from response
             json_match = re.search(r'\{.*\}', review_text, re.DOTALL)
@@ -516,15 +486,94 @@ Respond ONLY with the JSON, no other text."""
             else:
                 raise ValueError(f"Could not find JSON in response: {review_text[:200]}")
             
-            print(f"   ✅ Review complete (score: {review.get('score', '?')}/10, decision: {review.get('approval_decision', '?')})")
+            print(f"   ✅ Chunk {chunk_num}/{total_chunks} reviewed")
             return review
             
         except LLMError as e:
-            print(f"   ❌ LLM Error: {e}")
+            print(f"   ❌ LLM Error on chunk {chunk_num}: {e}")
             raise
         except json.JSONDecodeError as e:
-            print(f"   ❌ Invalid JSON from LLM: {e}")
+            print(f"   ❌ Invalid JSON from LLM on chunk {chunk_num}: {e}")
             raise
+    
+    def merge_chunk_reviews(self, reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge reviews from multiple chunks into a single review"""
+        
+        if not reviews:
+            return {
+                "summary": "No reviews to merge",
+                "approval_decision": "COMMENT",
+                "approval_reason": "No code was reviewed",
+                "score": 0,
+                "critical_issues": [],
+                "major_issues": [],
+                "minor_issues": []
+            }
+        
+        if len(reviews) == 1:
+            return reviews[0]
+        
+        # Merge multiple reviews
+        merged = {
+            "summary": f"Full MR review across {len(reviews)} chunks. " + 
+                      " ".join([r.get("summary", "") for r in reviews if r.get("summary")]),
+            "approval_decision": "REQUEST_CHANGES" if any(
+                r.get("approval_decision") == "REQUEST_CHANGES" for r in reviews
+            ) else ("APPROVE" if all(
+                r.get("approval_decision") in ["APPROVE", "COMMENT"] for r in reviews
+            ) else "COMMENT"),
+            "approval_reason": "Review based on full diff analysis across all chunks. " +
+                             " ".join([r.get("approval_reason", "") for r in reviews if r.get("approval_reason")]),
+            "score": int(sum(r.get("score", 0) for r in reviews) / len(reviews)),
+            "critical_issues": [],
+            "major_issues": [],
+            "minor_issues": []
+        }
+        
+        # Merge and deduplicate issues
+        seen_issues = set()
+        for review in reviews:
+            for issue_type in ["critical_issues", "major_issues", "minor_issues"]:
+                for issue in review.get(issue_type, []):
+                    issue_key = (
+                        issue.get("file", ""),
+                        issue.get("line", ""),
+                        issue.get("message", "")
+                    )
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        merged[issue_type].append(issue)
+        
+        return merged
+    
+    def review_with_claude(self, diff: str, total_size: int, files: List[str], llm: LLMClient) -> Dict[str, Any]:
+        """Call LLM to review the code - handles large diffs by chunking"""
+        print("\n🤖 Calling LLM for review...")
+        
+        # Decide if we need to chunk
+        chunk_size = 18000
+        
+        if total_size <= chunk_size:
+            # Small diff - review as-is
+            print(f"   Single review ({total_size} chars)")
+            return self.review_chunk(diff, 1, 1, files, llm)
+        
+        # Large diff - chunk it
+        print(f"   Large diff ({total_size} chars) - chunking for full review")
+        chunked = self.chunk_diff(diff, chunk_size)
+        print(f"   Split into {len(chunked)} chunks")
+        
+        reviews = []
+        for chunk_text, chunk_num, total_chunks in chunked:
+            print(f"   Processing chunk {chunk_num}/{total_chunks}...")
+            review = self.review_chunk(chunk_text, chunk_num, total_chunks, files, llm)
+            reviews.append(review)
+        
+        # Merge all reviews
+        merged_review = self.merge_chunk_reviews(reviews)
+        print(f"   ✅ Full review complete ({len(reviews)} chunks merged)")
+        
+        return merged_review
     
     def format_review_comment(self, review: Dict[str, Any]) -> str:
         """Format review results as GitLab MR comment"""
@@ -651,11 +700,11 @@ Respond ONLY with the JSON, no other text."""
             self.get_mr_details()
             
             # Step 2: Get code diff
-            diff = self.get_mr_diff()
+            diff, total_size = self.get_mr_diff()
             files = self.get_changed_files()
             
-            # Step 3: Review with LLM
-            review = self.review_with_claude(diff, files, llm)
+            # Step 3: Review with LLM (handles chunking automatically)
+            review = self.review_with_claude(diff, total_size, files, llm)
             
             # Step 4: Format comment
             comment = self.format_review_comment(review)
