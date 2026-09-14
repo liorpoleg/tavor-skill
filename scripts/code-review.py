@@ -363,7 +363,63 @@ class CodeReviewAgent:
         
         print(f"   Title: {self.mr_title}")
     
-    def get_mr_diff(self) -> Tuple[str, int]:
+    def parse_diff_for_line_mapping(self, diff: str) -> Dict[str, Dict[int, dict]]:
+        """
+        Parse diff to map file paths and line numbers
+        Returns: {file_path: {new_line: {old_line, status}}}
+        """
+        file_map = {}
+        current_file = None
+        old_line = 0
+        new_line = 0
+        
+        for line in diff.split('\n'):
+            # Detect file header: "FILE: path/to/file"
+            if line.startswith('FILE:'):
+                current_file = line.replace('FILE:', '').strip()
+                file_map[current_file] = {}
+                old_line = 0
+                new_line = 0
+                continue
+            
+            if current_file is None:
+                continue
+            
+            # Skip file section headers
+            if line.startswith('===') or line.startswith('---') or line.startswith('+++'):
+                continue
+            
+            # Parse @@ line numbers @@
+            if line.startswith('@@'):
+                # Example: @@ -10,5 +12,7 @@
+                match = re.search(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+                if match:
+                    old_line = int(match.group(1)) - 1  # -1 because we'll increment
+                    new_line = int(match.group(2)) - 1
+                continue
+            
+            # Track line numbers
+            if line.startswith('-') and not line.startswith('---'):
+                old_line += 1
+            elif line.startswith('+') and not line.startswith('+++'):
+                new_line += 1
+                # Map new line number to info
+                if new_line not in file_map[current_file]:
+                    file_map[current_file][new_line] = {
+                        'old_line': old_line,
+                        'status': 'added'
+                    }
+            else:
+                # Context line (unchanged)
+                old_line += 1
+                new_line += 1
+                if new_line not in file_map[current_file]:
+                    file_map[current_file][new_line] = {
+                        'old_line': old_line,
+                        'status': 'context'
+                    }
+        
+        return file_map
         """Fetch the code diff from the MR - returns full diff and total size"""
         print("📥 Fetching code diff...")
         response = requests.get(
@@ -675,6 +731,71 @@ Respond ONLY with the JSON, no other text."""
         response.raise_for_status()
         print("   ✅ Review posted successfully!")
     
+    def post_inline_comments(self, review: Dict[str, Any], file_map: Dict[str, Dict[int, dict]]) -> None:
+        """Post inline comments on specific diff lines for each issue"""
+        print("\n💬 Posting inline comments on diff lines...")
+        
+        # Collect all issues
+        all_issues = []
+        for issue in review.get("critical_issues", []):
+            all_issues.append((issue, "🛑 CRITICAL"))
+        for issue in review.get("major_issues", []):
+            all_issues.append((issue, "⚠️  MAJOR"))
+        for issue in review.get("minor_issues", []):
+            all_issues.append((issue, "💡 SUGGESTION"))
+        
+        posted_count = 0
+        for issue, severity in all_issues:
+            file_path = issue.get("file", "")
+            line_num = issue.get("line")
+            message = issue.get("message", "")
+            convention = issue.get("convention", "")
+            
+            # Skip if no file or line info
+            if not file_path or not line_num:
+                continue
+            
+            # Find this file in our map
+            if file_path not in file_map:
+                print(f"   ⚠️  File not found in diff: {file_path}")
+                continue
+            
+            # Find the line in the file map
+            if line_num not in file_map[file_path]:
+                print(f"   ⚠️  Line {line_num} not found in {file_path}")
+                continue
+            
+            # Build the inline comment
+            comment_body = f"{severity} **{message}**"
+            if convention:
+                comment_body += f"\n\n_Convention: {convention}_"
+            
+            try:
+                # Post discussion on this specific line
+                response = requests.post(
+                    f"{self.mr_api}/discussions",
+                    headers={"PRIVATE-TOKEN": GITLAB_TOKEN},
+                    json={
+                        "body": comment_body,
+                        "position": {
+                            "position_type": "text",
+                            "new_path": file_path,
+                            "new_line": line_num
+                        }
+                    }
+                )
+                
+                if response.status_code == 201:
+                    posted_count += 1
+                    print(f"   ✅ {file_path}:{line_num} - {message[:50]}")
+                else:
+                    print(f"   ⚠️  Failed to post on {file_path}:{line_num}: {response.status_code}")
+            
+            except Exception as e:
+                print(f"   ⚠️  Error posting inline comment: {e}")
+        
+        print(f"   ✅ Posted {posted_count} inline comments")
+    
     def save_review_result(self, review: Dict[str, Any]) -> None:
         """Save review result to file for CI/CD pipeline"""
         with open("review_result.json", "w") as f:
@@ -703,13 +824,19 @@ Respond ONLY with the JSON, no other text."""
             diff, total_size = self.get_mr_diff()
             files = self.get_changed_files()
             
+            # Parse diff for line mapping (needed for inline comments)
+            file_map = self.parse_diff_for_line_mapping(diff)
+            
             # Step 3: Review with LLM (handles chunking automatically)
             review = self.review_with_claude(diff, total_size, files, llm)
             
             # Step 4: Format comment
             comment = self.format_review_comment(review)
             
-            # Step 5: Post to GitLab
+            # Step 5a: Post inline comments on specific diff lines
+            self.post_inline_comments(review, file_map)
+            
+            # Step 5b: Post summary comment
             self.post_review_comment(comment)
             
             # Step 6: Save result for CI/CD
